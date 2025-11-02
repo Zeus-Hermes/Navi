@@ -1,0 +1,355 @@
+import Foundation
+
+class MemoryService {
+    private let geminiService: GeminiLiveService
+    private let storageService: StorageService
+    
+    init(geminiService: GeminiLiveService, storageService: StorageService) {
+        self.geminiService = geminiService
+        self.storageService = storageService
+    }
+    
+    // MARK: - Context Building
+    
+    /// Build context for sending with each message
+    func buildContext(for conversation: Conversation, currentMessage: String) -> String {
+        var context = ""
+        
+        // Load global memories
+        let globalMemories = storageService.loadGlobalMemories()
+        
+        // 1. Add conversation summary if it exists
+        if let summary = conversation.summary, !summary.isEmpty {
+            context += "CONVERSATION SUMMARY:\n\(summary)\n\n"
+        }
+        
+        // 2. Find and add relevant memories
+        let relevantMemories = findRelevantMemories(
+            for: currentMessage,
+            in: globalMemories,
+            limit: 5
+        )
+        
+        if !relevantMemories.isEmpty {
+            context += "RELEVANT FACTS YOU SHOULD KNOW:\n"
+            for memory in relevantMemories {
+                context += "- \(memory.fact)\n"
+            }
+            context += "\n"
+        }
+        
+        // 3. Recent messages will be sent separately by the ViewModel
+        
+        return context
+    }
+    
+    // MARK: - Memory Extraction
+    
+    /// Extract facts from recent conversation and return new/updated memories
+    func extractAndStoreMemories(from conversation: Conversation, recentMessages: [Message]) async throws -> (newMemories: [Memory], updatedMemories: [(old: Memory, new: Memory)]) {
+        // Only extract if there are enough new messages
+        guard recentMessages.count >= 4 else { return ([], []) }
+        
+        // Build conversation text for extraction
+        let conversationText = recentMessages.map { message in
+            let role = message.isUser ? "User" : conversation.companion.rawValue
+            return "\(role): \(message.content)"
+        }.joined(separator: "\n")
+        
+        // Create extraction prompt
+        let extractionPrompt = """
+        Analyze this conversation and extract important facts that should be remembered long-term.
+        
+        Focus on:
+        - Personal details (name, job, location, age, etc.)
+        - Important people/pets (names, relationships)
+        - Recurring issues or concerns
+        - Triggers (what causes stress/anxiety)
+        - Coping strategies (what helps or doesn't help)
+        - Goals and aspirations
+        - Significant life events
+        
+        Conversation:
+        \(conversationText)
+        
+        Return ONLY a JSON object with this exact structure (no markdown, no explanations):
+        {
+          "memories": [
+            {
+              "fact": "Clear, specific statement of the fact",
+              "tags": ["relevant", "searchable", "tags"],
+              "importance": 1-5
+            }
+          ]
+        }
+        
+        Rules:
+        - Only extract genuinely important facts worth remembering long-term
+        - Be specific (not "user has a pet" but "user's dog is named Max")
+        - Tags should be lowercase, single words or hyphenated phrases
+        - Importance: 1=minor detail, 3=notable, 5=critical information
+        - If nothing important to extract, return empty array
+        - DO NOT include any text outside the JSON object
+        """
+        
+        // Use Gemini to extract
+        let extractedJSON = try await callGeminiForExtraction(prompt: extractionPrompt)
+        
+        // Parse the response
+        guard let data = extractedJSON.data(using: .utf8),
+              let response = try? JSONDecoder().decode(MemoryExtractionResponse.self, from: data) else {
+            print(">>> [ERROR] Failed to parse memory extraction response")
+            return ([], [])
+        }
+        
+        // Load existing global memories
+        let existingMemories = storageService.loadGlobalMemories()
+        
+        // Load blacklisted memories
+        let blacklistedMemories = storageService.loadBlacklistedMemories()
+        
+        // Convert to Memory objects
+        let newMemories = response.memories.map { extracted in
+            Memory(
+                fact: extracted.fact,
+                tags: extracted.tags,
+                importance: extracted.importance
+            )
+        }
+        
+        // Process memories: filter blacklisted, update conflicts, or add new ones
+        var uniqueMemories: [Memory] = []
+        var memoriesToUpdate: [(old: Memory, new: Memory)] = []
+        
+        for newMemory in newMemories {
+            // First, check if this memory is blacklisted (user deleted it before)
+            if isBlacklisted(newMemory, in: blacklistedMemories) {
+                print(">>> [MEMORY] Skipped blacklisted memory: \(newMemory.fact)")
+                continue
+            }
+            
+            // Check for conflicts/updates
+            if let conflictingMemory = findConflictingMemory(newMemory, in: existingMemories) {
+                memoriesToUpdate.append((old: conflictingMemory, new: newMemory))
+                print(">>> [MEMORY] Updated: '\(conflictingMemory.fact)' → '\(newMemory.fact)'")
+            } else if !isDuplicateMemory(newMemory, in: existingMemories) {
+                // Not a duplicate or conflict, just add it
+                uniqueMemories.append(newMemory)
+                print(">>> [MEMORY] Stored: \(newMemory.fact)")
+            }
+        }
+        
+        return (uniqueMemories, memoriesToUpdate)
+    }
+    
+    // MARK: - Memory Retrieval
+    
+    /// Find memories relevant to the current message
+    private func findRelevantMemories(for message: String, in memories: [Memory], limit: Int) -> [Memory] {
+        guard !memories.isEmpty else {
+            print(">>> [MEMORY] No memories to search")
+            return []
+        }
+        
+        print(">>> [MEMORY] Searching \(memories.count) memories for: '\(message)'")
+        
+        let messageLower = message.lowercased()
+        let messageWords = Set(messageLower.components(separatedBy: .whitespacesAndNewlines)
+            .filter { $0.count > 2 }) // Lowered from 3 to 2
+        
+        print(">>> [MEMORY] Search keywords: \(messageWords)")
+        
+        // Score each memory based on relevance
+        var scoredMemories: [(memory: Memory, score: Double)] = []
+        
+        for memory in memories {
+            var score: Double = 0
+            
+            // Check if any tags match words in the message
+            for tag in memory.tags {
+                if messageWords.contains(tag) {
+                    score += 10.0
+                    print(">>> [MEMORY] Tag exact match '\(tag)': +10")
+                } else if messageLower.contains(tag) {
+                    score += 5.0
+                    print(">>> [MEMORY] Tag partial match '\(tag)': +5")
+                }
+            }
+            
+            // Check if the fact itself contains relevant keywords
+            let factLower = memory.fact.lowercased()
+            for word in messageWords {
+                // Check if the fact contains this word or a variant
+                if factLower.contains(word) {
+                    score += 3.0
+                    print(">>> [MEMORY] Fact contains '\(word)': +3")
+                }
+            }
+            
+            // Boost by importance
+            let importanceBoost = Double(memory.importance)
+            score *= importanceBoost
+            
+            // Slight boost for recent memories
+            let daysSinceExtracted = Date().timeIntervalSince(memory.extractedAt) / 86400
+            if daysSinceExtracted < 7 {
+                score *= 1.2
+            }
+            
+            print(">>> [MEMORY] Memory '\(memory.fact)' scored: \(score)")
+            
+            if score > 0 {
+                scoredMemories.append((memory, score))
+            }
+        }
+        
+        // Sort by score and return top N
+        let topMemories = scoredMemories
+            .sorted { $0.score > $1.score }
+            .prefix(limit)
+            .map { $0.memory }
+        
+        print(">>> [MEMORY] Returning \(topMemories.count) relevant memories")
+        for memory in topMemories {
+            print(">>> [MEMORY] - \(memory.fact)")
+        }
+        
+        return topMemories
+    }
+    
+    // MARK: - Helper Methods
+    
+    /// Check if a memory is a duplicate
+    private func isDuplicateMemory(_ newMemory: Memory, in existingMemories: [Memory]) -> Bool {
+        for existing in existingMemories {
+            // Check for exact match
+            if existing.fact.lowercased() == newMemory.fact.lowercased() {
+                return true
+            }
+            
+            // Check for very similar facts (>80% word overlap)
+            let existingWords = Set(existing.fact.lowercased().components(separatedBy: .whitespacesAndNewlines))
+            let newWords = Set(newMemory.fact.lowercased().components(separatedBy: .whitespacesAndNewlines))
+            
+            let intersection = existingWords.intersection(newWords)
+            let union = existingWords.union(newWords)
+            
+            let similarity = Double(intersection.count) / Double(union.count)
+            if similarity > 0.8 {
+                return true
+            }
+        }
+        
+        return false
+    }
+    
+    /// Find a conflicting memory that should be updated
+    private func findConflictingMemory(_ newMemory: Memory, in existingMemories: [Memory]) -> Memory? {
+        // Check if new memory conflicts with existing ones based on overlapping tags
+        for existing in existingMemories {
+            // Find common tags
+            let commonTags = Set(existing.tags).intersection(Set(newMemory.tags))
+            
+            // If they share significant tags but have different facts, it's likely a conflict
+            if !commonTags.isEmpty && commonTags.count >= 2 {
+                // Check if facts are actually different (not just similar wording)
+                let existingWords = Set(existing.fact.lowercased().components(separatedBy: .whitespacesAndNewlines))
+                let newWords = Set(newMemory.fact.lowercased().components(separatedBy: .whitespacesAndNewlines))
+                
+                let intersection = existingWords.intersection(newWords)
+                let union = existingWords.union(newWords)
+                let similarity = Double(intersection.count) / Double(union.count)
+                
+                // If similar tags but different facts (similarity < 60%), it's a conflict
+                if similarity < 0.6 {
+                    return existing
+                }
+            }
+        }
+        
+        return nil
+    }
+    
+    
+    /// Check if a memory matches something the user deleted (blacklisted)
+    private func isBlacklisted(_ newMemory: Memory, in blacklistedMemories: [Memory]) -> Bool {
+        for blacklisted in blacklistedMemories {
+            // Check for exact match
+            if blacklisted.fact.lowercased() == newMemory.fact.lowercased() {
+                return true
+            }
+            
+            // Check for high similarity (>70% word overlap)
+            let blacklistedWords = Set(blacklisted.fact.lowercased().components(separatedBy: .whitespacesAndNewlines))
+            let newWords = Set(newMemory.fact.lowercased().components(separatedBy: .whitespacesAndNewlines))
+            
+            let intersection = blacklistedWords.intersection(newWords)
+            let union = blacklistedWords.union(newWords)
+            
+            let similarity = Double(intersection.count) / Double(union.count)
+            if similarity > 0.7 {
+                return true
+            }
+        }
+        
+        return false
+    }
+    
+    /// Call Gemini for memory extraction (non-streaming)
+    private func callGeminiForExtraction(prompt: String) async throws -> String {
+        let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=\(Config.geminiAPIKey)")!
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let requestBody: [String: Any] = [
+            "contents": [
+                [
+                    "parts": [
+                        ["text": prompt]
+                    ]
+                ]
+            ],
+            "generationConfig": [
+                "temperature": 0.3,
+                "maxOutputTokens": 1000
+            ]
+        ]
+        
+        request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse,
+              httpResponse.statusCode == 200 else {
+            throw MemoryError.extractionFailed
+        }
+        
+        // Parse Gemini response
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let candidates = json["candidates"] as? [[String: Any]],
+              let firstCandidate = candidates.first,
+              let content = firstCandidate["content"] as? [String: Any],
+              let parts = content["parts"] as? [[String: Any]],
+              let firstPart = parts.first,
+              let text = firstPart["text"] as? String else {
+            throw MemoryError.invalidResponse
+        }
+        
+        // Clean up the response (remove markdown code blocks if present)
+        var cleanedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleanedText.hasPrefix("```json") {
+            cleanedText = cleanedText.replacingOccurrences(of: "```json", with: "")
+            cleanedText = cleanedText.replacingOccurrences(of: "```", with: "")
+            cleanedText = cleanedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        
+        return cleanedText
+    }
+}
+
+enum MemoryError: Error {
+    case extractionFailed
+    case invalidResponse
+}
