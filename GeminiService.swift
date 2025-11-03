@@ -50,7 +50,7 @@ class GeminiLiveService: NSObject, ObservableObject {
     private func sendSetup(companion: Companion) async throws {
         let setup: [String: Any] = [
             "setup": [
-                "model": "models/gemini-2.0-flash-exp",
+                "model": "models/gemini-live-2.5-flash-preview",
                 "generation_config": [
                     "response_modalities": ["TEXT"],
                     "temperature": 0.9,

@@ -120,46 +120,75 @@ struct MemoryRow: View {
             Text(memory.fact)
                 .font(.body)
             
-            // Tags
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ForEach(memory.tags, id: \.self) { tag in
-                        Text(tag)
-                            .font(.caption)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.blue.opacity(0.1))
-                            .foregroundColor(.blue)
-                            .cornerRadius(8)
-                    }
-                }
+            // Category badge
+            HStack {
+                Text(memory.category.rawValue)
+                    .font(.caption)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(categoryColor(memory.category).opacity(0.2))
+                    .foregroundColor(categoryColor(memory.category))
+                    .cornerRadius(8)
+                
+                Spacer()
             }
             
             // Metadata
             HStack {
-                // Importance
+                // Importance stars
                 HStack(spacing: 2) {
-                    ForEach(0..<memory.importance, id: \.self) { _ in
+                    ForEach(0..<min(memory.importance, 10), id: \.self) { _ in
                         Image(systemName: "star.fill")
                             .font(.caption2)
                             .foregroundColor(.orange)
-                    }
-                    ForEach(memory.importance..<5, id: \.self) { _ in
-                        Image(systemName: "star")
-                            .font(.caption2)
-                            .foregroundColor(.gray)
                     }
                 }
                 
                 Spacer()
                 
                 // Date
-                Text(memory.extractedAt, style: .date)
+                Text(memory.timestamp, style: .date)
                     .font(.caption)
                     .foregroundColor(.gray)
             }
+            
+            // Psychological insights if present
+            if let insight = memory.psychologicalInsight {
+                VStack(alignment: .leading, spacing: 4) {
+                    if let pattern = insight.patternType {
+                        Text("Pattern: \(pattern.rawValue)")
+                            .font(.caption2)
+                            .foregroundColor(.purple)
+                    }
+                    if let distortion = insight.cognitiveDistortion {
+                        Text("Distortion: \(distortion.rawValue)")
+                            .font(.caption2)
+                            .foregroundColor(.red)
+                    }
+                    if let technique = insight.effectiveTechnique {
+                        Text("Helps: \(technique)")
+                            .font(.caption2)
+                            .foregroundColor(.green)
+                    }
+                }
+                .padding(.top, 4)
+            }
         }
         .padding(.vertical, 4)
+    }
+    
+    private func categoryColor(_ category: MemoryCategory) -> Color {
+        switch category {
+        case .general: return .gray
+        case .preferences: return .blue
+        case .relationships: return .pink
+        case .work: return .orange
+        case .health: return .red
+        case .goals: return .green
+        case .triggers: return .purple
+        case .copingStrategies: return .teal
+        case .psychologicalPattern: return .indigo
+        }
     }
 }
 
@@ -178,7 +207,7 @@ class MemoriesViewModel: ObservableObject {
     
     func loadMemories() {
         memories = storageService.loadGlobalMemories()
-            .sorted { $0.extractedAt > $1.extractedAt } // Most recent first
+            .sorted(by: { $0.timestamp > $1.timestamp }) // Most recent first
     }
     
     func deleteMemories(at offsets: IndexSet) {

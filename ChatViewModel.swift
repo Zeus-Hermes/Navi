@@ -95,14 +95,16 @@ class ChatViewModel: ObservableObject {
         messages.append(userMessage)
         currentConversation.addMessage(userMessage)
         
+        // Build memory context (psychological patterns included in memories)
         let memoryContext = memoryService.buildContext(
             for: currentConversation,
             currentMessage: text
         )
         
+        // Build message with memory context only
         var messageToSend = text
         if !memoryContext.isEmpty {
-            messageToSend = memoryContext + "\nUser's message: " + text
+            messageToSend = memoryContext + "User's message: " + text
         }
         
         let companionMessageID = UUID()
@@ -163,6 +165,7 @@ class ChatViewModel: ObservableObject {
                     self.showUpgradePrompt = true
                 }
                 
+                // Extract memories (including psychological patterns)
                 let recentMessages = self.currentConversation.getRecentMessages(count: 6)
                 if recentMessages.count >= 4 {
                     do {
@@ -233,7 +236,6 @@ class ChatViewModel: ObservableObject {
         
         print(">>> [CHAT] 🎤 Recording stopped, transcribing...")
         
-        // Save to temp file
         let tempURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("voice_\(UUID().uuidString).wav")
         
@@ -248,7 +250,6 @@ class ChatViewModel: ObservableObject {
             
             try? FileManager.default.removeItem(at: tempURL)
             
-            // Send to Gemini
             await sendMessage(transcript)
             
         } catch {

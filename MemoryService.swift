@@ -34,11 +34,25 @@ class MemoryService {
             context += "RELEVANT FACTS YOU SHOULD KNOW:\n"
             for memory in relevantMemories {
                 context += "- \(memory.fact)\n"
+                
+                // Add psychological context if present
+                if let insight = memory.psychologicalInsight {
+                    if let pattern = insight.patternType {
+                        context += "  (Pattern: \(pattern.rawValue))\n"
+                    }
+                    if let distortion = insight.cognitiveDistortion {
+                        context += "  (Distortion: \(distortion.rawValue))\n"
+                    }
+                    if let technique = insight.effectiveTechnique {
+                        context += "  (What helps: \(technique))\n"
+                    }
+                    if let trigger = insight.triggerIdentified {
+                        context += "  (Trigger: \(trigger))\n"
+                    }
+                }
             }
             context += "\n"
         }
-        
-        // 3. Recent messages will be sent separately by the ViewModel
         
         return context
     }
@@ -64,8 +78,11 @@ class MemoryService {
         - Personal details (name, job, location, age, etc.)
         - Important people/pets (names, relationships)
         - Recurring issues or concerns
-        - Triggers (what causes stress/anxiety)
-        - Coping strategies (what helps or doesn't help)
+        - **Triggers** (what causes stress/anxiety/distress)
+        - **Coping strategies** (what helps or doesn't help)
+        - **Cognitive patterns** (catastrophizing, black-and-white thinking, etc.)
+        - **Emotional patterns** (recurring anxiety, depression, anger)
+        - **Effective techniques** (grounding, breathing, specific interventions that worked)
         - Goals and aspirations
         - Significant life events
         
@@ -77,8 +94,15 @@ class MemoryService {
           "memories": [
             {
               "fact": "Clear, specific statement of the fact",
-              "tags": ["relevant", "searchable", "tags"],
-              "importance": 1-5
+              "category": "general|preferences|relationships|work|health|goals|triggers|copingStrategies|psychologicalPattern",
+              "tags": ["relevant", "searchable", "keywords"],
+              "importance": 1-10,
+              "psychological_insight": {
+                "pattern_type": "recurringAnxiety|depressiveEpisodes|angerOutbursts|avoidanceBehavior|catastrophizingPattern|perfectionism|socialWithdrawal|workStress|academicPressure|null",
+                "cognitive_distortion": "catastrophizing|blackAndWhiteThinking|overgeneralization|mindReading|fortuneTelling|emotionalReasoning|shouldStatements|labeling|personalization|mentalFilter|discountingPositives|null",
+                "effective_technique": "Name of technique that helped (e.g., '5-4-3-2-1 grounding', 'box breathing', 'thought challenging')|null",
+                "trigger_identified": "Specific trigger (e.g., 'exams', 'work deadlines', 'social situations')|null"
+              }
             }
           ]
         }
@@ -86,25 +110,57 @@ class MemoryService {
         CRITICAL RULES TO PREVENT FALSE MEMORIES:
         - ONLY extract facts that the USER explicitly stated themselves
         - DO NOT extract information that the AI companion guessed, assumed, or suggested
-        - DO NOT extract questions the AI asked (e.g., if AI asks "Do you work at X?", don't store "User works at X")
+        - DO NOT extract questions the AI asked
         - If the AI mentioned something but the user didn't confirm it, DO NOT extract it
         - When in doubt, DO NOT extract - it's better to miss a memory than store a false one
         
+        PSYCHOLOGICAL PATTERN EXTRACTION:
+        - If user says "I always think the worst will happen" → extract catastrophizing pattern
+        - If companion suggests a technique and user says it helped → extract as effective_technique
+        - If user mentions "exams make me anxious" → extract "exams" as trigger
+        - If user shows black-and-white thinking ("I'm either perfect or a failure") → extract distortion
+        - Only extract psychological insights when explicitly demonstrated in conversation
+        
         Additional Rules:
         - Only extract genuinely important facts worth remembering long-term
-        - Be specific (not "user has a pet" but "user's dog is named Max")
-        - Tags should be lowercase, single words or hyphenated phrases
-        - Importance: 1=minor detail, 3=notable, 5=critical information
+        - Be specific (not "user has anxiety" but "user experiences test anxiety before exams")
+        - Tags should be lowercase, single words or hyphenated phrases for search
+        - Importance: 1=minor detail, 5=notable, 10=critical information
+        - psychological_insight fields can be null if not applicable
         - If nothing important to extract, return empty array
         - DO NOT include any text outside the JSON object
         
-        Example of CORRECT extraction:
-        User: "I work at Integrity Urgent Care"
-        Extract: {"fact": "User works at Integrity Urgent Care", "tags": ["job", "work", "healthcare"]}
+        Examples:
         
-        Example of INCORRECT extraction (DO NOT DO THIS):
-        AI: "Last I checked, you were at the Googleplex"
-        DO NOT extract this - the AI said it, not the user
+        User: "I get so anxious before exams, I always think I'll fail"
+        Extract: 
+        {
+          "fact": "User experiences test anxiety and catastrophizes about exam performance",
+          "category": "psychologicalPattern",
+          "tags": ["anxiety", "exams", "catastrophizing", "academic"],
+          "importance": 7,
+          "psychological_insight": {
+            "pattern_type": "academicPressure",
+            "cognitive_distortion": "catastrophizing",
+            "effective_technique": null,
+            "trigger_identified": "exams"
+          }
+        }
+        
+        User: "That grounding exercise you suggested really helped calm me down"
+        Extract:
+        {
+          "fact": "5-4-3-2-1 grounding technique helps user manage anxiety",
+          "category": "copingStrategies",
+          "tags": ["grounding", "anxiety", "technique", "effective"],
+          "importance": 8,
+          "psychological_insight": {
+            "pattern_type": null,
+            "cognitive_distortion": null,
+            "effective_technique": "5-4-3-2-1 grounding",
+            "trigger_identified": null
+          }
+        }
         """
         
         // Use Gemini to extract
@@ -125,10 +181,28 @@ class MemoryService {
         
         // Convert to Memory objects
         let newMemories = response.memories.map { extracted in
-            Memory(
+            let category = MemoryCategory(rawValue: extracted.category) ?? .general
+            
+            // Convert psychological insight if present
+            var psychInsight: PsychologicalInsight? = nil
+            if let extractedInsight = extracted.psychologicalInsight {
+                let patternType = extractedInsight.patternType.flatMap { PatternType(rawValue: $0) }
+                let distortion = extractedInsight.cognitiveDistortion.flatMap { CognitiveDistortion(rawValue: $0) }
+                
+                psychInsight = PsychologicalInsight(
+                    patternType: patternType,
+                    cognitiveDistortion: distortion,
+                    effectiveTechnique: extractedInsight.effectiveTechnique,
+                    triggerIdentified: extractedInsight.triggerIdentified
+                )
+            }
+            
+            return Memory(
                 fact: extracted.fact,
+                category: category,
+                importance: extracted.importance,
                 tags: extracted.tags,
-                importance: extracted.importance
+                psychologicalInsight: psychInsight
             )
         }
         
@@ -137,7 +211,7 @@ class MemoryService {
         var memoriesToUpdate: [(old: Memory, new: Memory)] = []
         
         for newMemory in newMemories {
-            // First, check if this memory is blacklisted (user deleted it before)
+            // Check if blacklisted
             if isBlacklisted(newMemory, in: blacklistedMemories) {
                 print(">>> [MEMORY] Skipped blacklisted memory: \(newMemory.fact)")
                 continue
@@ -148,7 +222,6 @@ class MemoryService {
                 memoriesToUpdate.append((old: conflictingMemory, new: newMemory))
                 print(">>> [MEMORY] Updated: '\(conflictingMemory.fact)' → '\(newMemory.fact)'")
             } else if !isDuplicateMemory(newMemory, in: existingMemories) {
-                // Not a duplicate or conflict, just add it
                 uniqueMemories.append(newMemory)
                 print(">>> [MEMORY] Stored: \(newMemory.fact)")
             }
@@ -170,7 +243,7 @@ class MemoryService {
         
         let messageLower = message.lowercased()
         let messageWords = Set(messageLower.components(separatedBy: .whitespacesAndNewlines)
-            .filter { $0.count > 2 }) // Lowered from 3 to 2
+            .filter { $0.count > 2 })
         
         print(">>> [MEMORY] Search keywords: \(messageWords)")
         
@@ -180,7 +253,7 @@ class MemoryService {
         for memory in memories {
             var score: Double = 0
             
-            // Check if any tags match words in the message
+            // Check if any tags match words in the message (HIGH PRIORITY)
             for tag in memory.tags {
                 if messageWords.contains(tag) {
                     score += 10.0
@@ -194,7 +267,6 @@ class MemoryService {
             // Check if the fact itself contains relevant keywords
             let factLower = memory.fact.lowercased()
             for word in messageWords {
-                // Check if the fact contains this word or a variant
                 if factLower.contains(word) {
                     score += 3.0
                     print(">>> [MEMORY] Fact contains '\(word)': +3")
@@ -206,8 +278,8 @@ class MemoryService {
             score *= importanceBoost
             
             // Slight boost for recent memories
-            let daysSinceExtracted = Date().timeIntervalSince(memory.extractedAt) / 86400
-            if daysSinceExtracted < 7 {
+            let daysSinceCreated = Date().timeIntervalSince(memory.timestamp) / 86400
+            if daysSinceCreated < 7 {
                 score *= 1.2
             }
             
@@ -260,14 +332,11 @@ class MemoryService {
     
     /// Find a conflicting memory that should be updated
     private func findConflictingMemory(_ newMemory: Memory, in existingMemories: [Memory]) -> Memory? {
-        // Check if new memory conflicts with existing ones based on overlapping tags
+        // Check if new memory conflicts with existing ones based on category
         for existing in existingMemories {
-            // Find common tags
-            let commonTags = Set(existing.tags).intersection(Set(newMemory.tags))
-            
-            // If they share significant tags but have different facts, it's likely a conflict
-            if !commonTags.isEmpty && commonTags.count >= 2 {
-                // Check if facts are actually different (not just similar wording)
+            // If same category
+            if existing.category == newMemory.category {
+                // Check if facts are actually different
                 let existingWords = Set(existing.fact.lowercased().components(separatedBy: .whitespacesAndNewlines))
                 let newWords = Set(newMemory.fact.lowercased().components(separatedBy: .whitespacesAndNewlines))
                 
@@ -275,8 +344,8 @@ class MemoryService {
                 let union = existingWords.union(newWords)
                 let similarity = Double(intersection.count) / Double(union.count)
                 
-                // If similar tags but different facts (similarity < 60%), it's a conflict
-                if similarity < 0.6 {
+                // If similar category but different facts, might be conflict
+                if similarity > 0.3 && similarity < 0.6 {
                     return existing
                 }
             }
@@ -284,7 +353,6 @@ class MemoryService {
         
         return nil
     }
-    
     
     /// Check if a memory matches something the user deleted (blacklisted)
     private func isBlacklisted(_ newMemory: Memory, in blacklistedMemories: [Memory]) -> Bool {
@@ -352,7 +420,7 @@ class MemoryService {
             throw MemoryError.invalidResponse
         }
         
-        // Clean up the response (remove markdown code blocks if present)
+        // Clean up the response
         var cleanedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if cleanedText.hasPrefix("```json") {
             cleanedText = cleanedText.replacingOccurrences(of: "```json", with: "")
@@ -361,6 +429,42 @@ class MemoryService {
         }
         
         return cleanedText
+    }
+}
+
+// MARK: - Response Models
+
+struct MemoryExtractionResponse: Codable {
+    let memories: [ExtractedMemory]
+}
+
+struct ExtractedMemory: Codable {
+    let fact: String
+    let category: String
+    let tags: [String]
+    let importance: Int
+    let psychologicalInsight: ExtractedPsychologicalInsight?
+    
+    enum CodingKeys: String, CodingKey {
+        case fact
+        case category
+        case tags
+        case importance
+        case psychologicalInsight = "psychological_insight"
+    }
+}
+
+struct ExtractedPsychologicalInsight: Codable {
+    let patternType: String?
+    let cognitiveDistortion: String?
+    let effectiveTechnique: String?
+    let triggerIdentified: String?
+    
+    enum CodingKeys: String, CodingKey {
+        case patternType = "pattern_type"
+        case cognitiveDistortion = "cognitive_distortion"
+        case effectiveTechnique = "effective_technique"
+        case triggerIdentified = "trigger_identified"
     }
 }
 

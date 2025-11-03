@@ -107,11 +107,11 @@ class OpenAITTSService {
         print(">>> [TTS DEBUG] Audio engine running: \(audioEngine.isRunning)")
         
         // Determine voice based on companion
-        let voice = companion == .theo ? "fable" : "shimmer"
+        let voice = companion == .theo ? "ballad" : "shimmer"
         
         // Get personality instructions from companion
-        let instructions = companion.systemPrompt
-        
+        let instructions = companion.ttsInstructions
+
         // Make API request
         let url = URL(string: "https://api.openai.com/v1/audio/speech")!
         var request = URLRequest(url: url)
